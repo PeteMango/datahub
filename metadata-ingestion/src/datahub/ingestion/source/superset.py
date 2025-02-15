@@ -22,6 +22,8 @@ from datahub.emitter.mce_builder import (
     make_dataset_urn,
     make_dataset_urn_with_platform_instance,
     make_domain_urn,
+    make_schema_field_urn,
+    make_user_urn,
 )
 from datahub.emitter.mcp_builder import add_domain_to_entity_wu
 from datahub.ingestion.api.common import PipelineContext
@@ -73,10 +75,21 @@ from datahub.metadata.schema_classes import (
     DashboardInfoClass,
     DatasetLineageTypeClass,
     DatasetPropertiesClass,
+    FineGrainedLineageClass,
+    FineGrainedLineageDownstreamTypeClass,
+    FineGrainedLineageUpstreamTypeClass,
     GlobalTagsClass,
+    OwnerClass,
+    OwnershipClass,
+    OwnershipTypeClass,
     TagAssociationClass,
     UpstreamClass,
     UpstreamLineageClass,
+)
+from datahub.sql_parsing.sqlglot_lineage import (
+    ColumnLineageInfo,
+    SqlParsingResult,
+    create_lineage_sql_parsed_result,
 )
 from datahub.utilities import config_clean
 from datahub.utilities.registries.domain_registry import DomainRegistry
@@ -238,6 +251,7 @@ class SupersetSource(StatefulIngestionSourceBase):
                 graph=self.ctx.graph,
             )
         self.session = self.login()
+        self.full_owners_dict = self.build_preset_owner_dict()
 
     def login(self) -> requests.Session:
         login_response = requests.post(
@@ -369,6 +383,99 @@ class SupersetSource(StatefulIngestionSourceBase):
                 env=self.config.env,
             )
         raise ValueError("Could not construct dataset URN")
+
+    def parse_owner_payload(self, payload, owners_dict):
+        for owner_data in payload.get("result", []):
+            email = owner_data.get("extra", {}).get("email")
+            owner_id = owner_data.get("value")
+
+            if owner_id and email:
+                owners_dict[owner_id] = email
+        return owners_dict
+
+    def build_preset_owner_dict(self) -> dict:
+        owners_dict: dict = {}
+        dataset_payload = self.get_all_dataset_owners()
+        chart_payload = self.get_all_chart_owners()
+        dashboard_payload = self.get_all_dashboard_owners()
+
+        owners_dict = self.parse_owner_payload(dataset_payload, owners_dict)
+        owners_dict = self.parse_owner_payload(chart_payload, owners_dict)
+        owners_dict = self.parse_owner_payload(dashboard_payload, owners_dict)
+        return owners_dict
+
+    def build_owners_urn_list(self, data):
+        owners_urn_list = []
+        for owner in data.get("owners", []):
+            owner_id = owner.get("id")
+            owner_email = self.full_owners_dict.get(owner_id)
+            if owner_email:
+                owners_urn = make_user_urn(owner_email)
+                owners_urn_list.append(owners_urn)
+        return owners_urn_list
+
+    def get_all_dataset_owners(self) -> dict:
+        current_dataset_page = 1
+        total_dataset_owners = PAGE_SIZE
+        all_dataset_owners = []
+        while (current_dataset_page - 1) * PAGE_SIZE <= total_dataset_owners:
+            full_owners_response = self.session.get(
+                f"{self.config.connect_uri}/api/v1/dataset/related/owners",
+                params=f"q=(page:{current_dataset_page},page_size:{PAGE_SIZE})",
+            )
+            if full_owners_response.status_code != 200:
+                logger.warning(
+                    f"Failed to get dataset data: {full_owners_response.text}"
+                )
+            full_owners_response.raise_for_status()
+
+            payload = full_owners_response.json()
+            total_dataset_owners = payload.get("count", total_dataset_owners)
+            all_dataset_owners.extend(payload.get("result", []))
+            current_dataset_page += 1
+
+        return {"result": all_dataset_owners, "count": total_dataset_owners}
+
+    def get_all_chart_owners(self) -> dict:
+        current_chart_page = 1
+        total_chart_owners = PAGE_SIZE
+        all_chart_owners = []
+        while (current_chart_page - 1) * PAGE_SIZE <= total_chart_owners:
+            full_owners_response = self.session.get(
+                f"{self.config.connect_uri}/api/v1/chart/related/owners",
+                params=f"q=(page:{current_chart_page},page_size:{PAGE_SIZE})",
+            )
+            if full_owners_response.status_code != 200:
+                logger.warning(f"Failed to get chart data: {full_owners_response.text}")
+            full_owners_response.raise_for_status()
+            payload = full_owners_response.json()
+            total_chart_owners = payload.get("count", total_chart_owners)
+            all_chart_owners.extend(payload.get("result", []))
+            current_chart_page += 1
+
+        return {"result": all_chart_owners, "count": total_chart_owners}
+
+    def get_all_dashboard_owners(self) -> dict:
+        current_dashboard_page = 1
+        total_dashboard_owners = PAGE_SIZE
+        all_dashboard_owners = []
+        while (current_dashboard_page - 1) * PAGE_SIZE <= total_dashboard_owners:
+            full_owners_response = self.session.get(
+                f"{self.config.connect_uri}/api/v1/dashboard/related/owners",
+                params=f"q=(page:{current_dashboard_page},page_size:{PAGE_SIZE})",
+            )
+            if full_owners_response.status_code != 200:
+                logger.warning(
+                    f"Failed to get dashboard data: {full_owners_response.text}"
+                )
+            full_owners_response.raise_for_status()
+
+            payload = full_owners_response.json()
+            total_dashboard_owners = payload.get("count", total_dashboard_owners)
+            all_dashboard_owners.extend(payload.get("result", []))
+            current_dashboard_page += 1
+
+        return {"result": all_dashboard_owners, "count": total_dashboard_owners}
 
     def construct_dashboard_from_api_data(
         self, dashboard_data: dict
@@ -541,6 +648,20 @@ class SupersetSource(StatefulIngestionSourceBase):
             customProperties=custom_properties,
         )
         chart_snapshot.aspects.append(chart_info)
+
+        chart_owners_list = self.build_owners_urn_list(chart_data)
+        owners_info = OwnershipClass(
+            owners=[
+                OwnerClass(
+                    owner=urn,
+                    # default as Technical Owners from Preset
+                    type=OwnershipTypeClass.TECHNICAL_OWNER,
+                )
+                for urn in (chart_owners_list or [])
+            ],
+        )
+        chart_snapshot.aspects.append(owners_info)
+
         return chart_snapshot
 
     def emit_chart_mces(self) -> Iterable[MetadataWorkUnit]:
@@ -603,6 +724,48 @@ class SupersetSource(StatefulIngestionSourceBase):
             env=self.config.env,
         )
 
+    def generate_virtual_dataset_lineage(
+        self, parsed_query_object: SqlParsingResult, datasource_urn: str
+    ) -> UpstreamLineageClass:
+        cll: List[ColumnLineageInfo] = (
+            parsed_query_object.column_lineage
+            if parsed_query_object.column_lineage is not None
+            else []
+        )
+
+        fine_grained_lineages: List[FineGrainedLineageClass] = []
+
+        for cll_info in cll:
+            downstream = (
+                [make_schema_field_urn(datasource_urn, cll_info.downstream.column)]
+                if cll_info.downstream and cll_info.downstream.column
+                else []
+            )
+            upstreams = [
+                make_schema_field_urn(column_ref.table, column_ref.column)
+                for column_ref in cll_info.upstreams
+            ]
+            fine_grained_lineages.append(
+                FineGrainedLineageClass(
+                    downstreamType=FineGrainedLineageDownstreamTypeClass.FIELD,
+                    downstreams=downstream,
+                    upstreamType=FineGrainedLineageUpstreamTypeClass.FIELD_SET,
+                    upstreams=upstreams,
+                )
+            )
+
+        upstream_lineage = UpstreamLineageClass(
+            upstreams=[
+                UpstreamClass(
+                    type=DatasetLineageTypeClass.TRANSFORMED,
+                    dataset=input_table_urn,
+                )
+                for input_table_urn in parsed_query_object.in_tables
+            ],
+            fineGrainedLineages=fine_grained_lineages,
+        )
+        return upstream_lineage
+
     def construct_dataset_from_dataset_data(
         self, dataset_data: dict
     ) -> DatasetSnapshot:
@@ -611,12 +774,15 @@ class SupersetSource(StatefulIngestionSourceBase):
             dataset_response, self.platform
         )
 
-        dataset_url = f"{self.config.display_uri}{dataset_data.get('explore_url', '')}"
+        dataset_url = f"{self.config.display_uri}{dataset_data.get('url', '')}"
 
         # modified_actor = f"urn:li:corpuser:{(dataset_data.get('changed_by') or {}).get('username', 'unknown')}"
         modified_ts = int(
             dp.parse(dataset_data.get("changed_on_utc", "now")).timestamp() * 1000
         )
+        sql = dataset_response.get("result", {}).get(
+            "rendered_sql"
+        ) or dataset_response.get("result", {}).get("sql")
 
         table_name = dataset_data.get("table_name", "")
         database_id = dataset_response.get("result", {}).get("database", {}).get("id")
@@ -625,9 +791,31 @@ class SupersetSource(StatefulIngestionSourceBase):
         )
         upstream_warehouse_platform = self.get_platform_from_database_id(database_id)
 
-        logger.info(
-            f"constructing data with source {datasource_urn} and upstream warehosue db: {upstream_warehouse_db_name} - {upstream_warehouse_platform}"
+        parsed_query_object = create_lineage_sql_parsed_result(
+            query=sql,
+            default_db=upstream_warehouse_db_name,
+            platform=upstream_warehouse_platform,
+            platform_instance=None,
+            env=self.config.env,
         )
+        if sql:
+            tag_urn = f"urn:li:tag:{self.platform}:virtual"
+            upstream_lineage = self.generate_virtual_dataset_lineage(
+                parsed_query_object, datasource_urn
+            )
+        else:
+            tag_urn = f"urn:li:tag:{self.platform}:physical"
+            upstream_dataset = self.get_datasource_urn_from_id(
+                dataset_response, upstream_warehouse_platform
+            )
+            upstream_lineage = UpstreamLineageClass(
+                upstreams=[
+                    UpstreamClass(
+                        type=DatasetLineageTypeClass.TRANSFORMED,
+                        dataset=upstream_dataset,
+                    )
+                ]
+            )
 
         metrics = [
             metric.get("metric_name")
@@ -652,26 +840,26 @@ class SupersetSource(StatefulIngestionSourceBase):
         )
         aspects_items: List[Any] = []
 
-        tag_urn = f"urn:li:tag:{self.platform}:physical"
-        upstream_dataset = self.get_datasource_urn_from_id(
-            dataset_response, upstream_warehouse_platform
-        )
-        upstream_lineage = UpstreamLineageClass(
-            upstreams=[
-                UpstreamClass(
-                    type=DatasetLineageTypeClass.TRANSFORMED,
-                    dataset=upstream_dataset,
+        global_tags = GlobalTagsClass(tags=[TagAssociationClass(tag=tag_urn)])
+        dataset_owners_list = self.build_owners_urn_list(dataset_data)
+        owners_info = OwnershipClass(
+            owners=[
+                OwnerClass(
+                    owner=urn,
+                    # default as Technical Owners from Preset
+                    type=OwnershipTypeClass.TECHNICAL_OWNER,
                 )
-            ]
+                for urn in (dataset_owners_list or [])
+            ],
         )
 
-        global_tags = GlobalTagsClass(tags=[TagAssociationClass(tag=tag_urn)])
         aspects_items.extend(
             [
                 self.gen_schema_metadata(dataset_response),
                 dataset_info,
                 upstream_lineage,
                 global_tags,
+                owners_info,
             ]
         )
         dataset_snapshot = DatasetSnapshot(
