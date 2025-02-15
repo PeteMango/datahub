@@ -71,7 +71,12 @@ from datahub.metadata.schema_classes import (
     ChartInfoClass,
     ChartTypeClass,
     DashboardInfoClass,
+    DatasetLineageTypeClass,
     DatasetPropertiesClass,
+    GlobalTagsClass,
+    TagAssociationClass,
+    UpstreamClass,
+    UpstreamLineageClass,
 )
 from datahub.utilities import config_clean
 from datahub.utilities.registries.domain_registry import DomainRegistry
@@ -329,15 +334,21 @@ class SupersetSource(StatefulIngestionSourceBase):
         table_name = dataset_response.get("result", {}).get("table_name")
         database_id = dataset_response.get("result", {}).get("database", {}).get("id")
 
-        if platform_instance:
-            platform = self.platform
-        else:
-            platform = self.get_platform_from_database_id(database_id)
-
         database_name = (
             dataset_response.get("result", {}).get("database", {}).get("database_name")
         )
         database_name = self.config.database_alias.get(database_name, database_name)
+
+        if database_id and table_name:
+            return make_dataset_urn(
+                platform=platform_instance,
+                name=".".join(
+                    name for name in [database_name, schema_name, table_name] if name
+                ),
+                env=self.config.env,
+            )
+
+        platform = self.get_platform_from_database_id(database_id)
 
         # Druid do not have a database concept and has a limited schema concept, but they are nonetheless reported
         # from superset. There is only one database per platform instance, and one schema named druid, so it would be
@@ -596,29 +607,73 @@ class SupersetSource(StatefulIngestionSourceBase):
         self, dataset_data: dict
     ) -> DatasetSnapshot:
         dataset_response = self.get_dataset_info(dataset_data.get("id"))
-        dataset = SupersetDataset(**dataset_response["result"])
         datasource_urn = self.get_datasource_urn_from_id(
             dataset_response, self.platform
         )
 
-        dataset_url = f"{self.config.display_uri}{dataset.url or ''}"
+        dataset_url = f"{self.config.display_uri}{dataset_data.get('explore_url', '')}"
+
+        # modified_actor = f"urn:li:corpuser:{(dataset_data.get('changed_by') or {}).get('username', 'unknown')}"
+        modified_ts = int(
+            dp.parse(dataset_data.get("changed_on_utc", "now")).timestamp() * 1000
+        )
+
+        table_name = dataset_data.get("table_name", "")
+        database_id = dataset_response.get("result", {}).get("database", {}).get("id")
+        upstream_warehouse_db_name = (
+            dataset_response.get("result", {}).get("database", {}).get("database_name")
+        )
+        upstream_warehouse_platform = self.get_platform_from_database_id(database_id)
+
+        logger.info(
+            f"constructing data with source {datasource_urn} and upstream warehosue db: {upstream_warehouse_db_name} - {upstream_warehouse_platform}"
+        )
+
+        metrics = [
+            metric.get("metric_name")
+            for metric in (dataset_response.get("result", {}).get("metrics", []))
+        ]
+
+        owners = [
+            owner.get("first_name") + "_" + str(owner.get("id"))
+            for owner in (dataset_response.get("result", {}).get("owners", []))
+        ]
+        custom_properties = {
+            "Metrics": ", ".join(metrics),
+            "Owners": ", ".join(owners),
+        }
 
         dataset_info = DatasetPropertiesClass(
-            name=dataset.table_name,
+            name=table_name,
             description="",
-            lastModified=TimeStamp(time=dataset.modified_ts)
-            if dataset.modified_ts
-            else None,
+            lastModified=TimeStamp(time=modified_ts),
             externalUrl=dataset_url,
+            customProperties=custom_properties,
         )
         aspects_items: List[Any] = []
+
+        tag_urn = f"urn:li:tag:{self.platform}:physical"
+        upstream_dataset = self.get_datasource_urn_from_id(
+            dataset_response, upstream_warehouse_platform
+        )
+        upstream_lineage = UpstreamLineageClass(
+            upstreams=[
+                UpstreamClass(
+                    type=DatasetLineageTypeClass.TRANSFORMED,
+                    dataset=upstream_dataset,
+                )
+            ]
+        )
+
+        global_tags = GlobalTagsClass(tags=[TagAssociationClass(tag=tag_urn)])
         aspects_items.extend(
             [
                 self.gen_schema_metadata(dataset_response),
                 dataset_info,
+                upstream_lineage,
+                global_tags,
             ]
         )
-
         dataset_snapshot = DatasetSnapshot(
             urn=datasource_urn,
             aspects=aspects_items,
@@ -631,6 +686,7 @@ class SupersetSource(StatefulIngestionSourceBase):
                 dataset_snapshot = self.construct_dataset_from_dataset_data(
                     dataset_data
                 )
+
                 mce = MetadataChangeEvent(proposedSnapshot=dataset_snapshot)
             except Exception as e:
                 self.report.warning(
