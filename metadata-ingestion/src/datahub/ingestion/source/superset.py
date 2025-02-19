@@ -799,12 +799,12 @@ class SupersetSource(StatefulIngestionSourceBase):
             env=self.config.env,
         )
         if sql:
-            tag_urn = f"urn:li:tag:{self.platform}:virtual"
+            tag_urn = f"urn:li:tag:{self.platform}:peter-virtual"
             upstream_lineage = self.generate_virtual_dataset_lineage(
                 parsed_query_object, datasource_urn
             )
         else:
-            tag_urn = f"urn:li:tag:{self.platform}:physical"
+            tag_urn = f"urn:li:tag:{self.platform}:peter-physical"
             upstream_dataset = self.get_datasource_urn_from_id(
                 dataset_response, upstream_warehouse_platform
             )
@@ -862,6 +862,11 @@ class SupersetSource(StatefulIngestionSourceBase):
                 owners_info,
             ]
         )
+
+        logger.info(
+            f"dataset info: {dataset_info} \n upstream lineage: {upstream_lineage}"
+        )
+
         dataset_snapshot = DatasetSnapshot(
             urn=datasource_urn,
             aspects=aspects_items,
