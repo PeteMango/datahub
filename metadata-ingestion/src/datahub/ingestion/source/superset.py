@@ -466,7 +466,7 @@ class SupersetSource(StatefulIngestionSourceBase):
         datasource_id = chart_data.get("datasource_id")
         if not datasource_id:
             logger.debug(
-                f'chart {chart_data["id"]} has no datasource_id, skipping fetching dataset info'
+                f"chart {chart_data['id']} has no datasource_id, skipping fetching dataset info"
             )
             datasource_urn = None
         else:
