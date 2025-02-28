@@ -387,6 +387,63 @@ def register_mock_api(request_mock: Any, override_data: Optional[dict] = None) -
                 },
             },
         },
+        "mock://mock-domain.superset.com/api/v1/dashboard/related/owners": {
+            "method": "GET",
+            "status_code": 200,
+            "json": {
+                "count": 2,
+                "result": [
+                    {
+                        "extra": {"active": True, "email": "test_owner1@example.com"},
+                        "text": "test_owner1",
+                        "value": 1,
+                    },
+                    {
+                        "extra": {"active": True, "email": "test_owner2@example.com"},
+                        "text": "test_owner2",
+                        "value": 2,
+                    },
+                ],
+            },
+        },
+        "mock://mock-domain.superset.com/api/v1/dataset/related/owners": {
+            "method": "GET",
+            "status_code": 200,
+            "json": {
+                "count": 2,
+                "result": [
+                    {
+                        "extra": {"active": True, "email": "test_owner3@example.com"},
+                        "text": "test_owner3",
+                        "value": 3,
+                    },
+                    {
+                        "extra": {"active": True, "email": "test_owner4@example.com"},
+                        "text": "test_owner4",
+                        "value": 4,
+                    },
+                ],
+            },
+        },
+        "mock://mock-domain.superset.com/api/v1/chart/related/owners": {
+            "method": "GET",
+            "status_code": 200,
+            "json": {
+                "count": 2,
+                "result": [
+                    {
+                        "extra": {"active": True, "email": "test_owner5@example.com"},
+                        "text": "test_owner5",
+                        "value": 5,
+                    },
+                    {
+                        "extra": {"active": True, "email": "test_owner6@example.com"},
+                        "text": "test_owner6",
+                        "value": 6,
+                    },
+                ],
+            },
+        },
     }
 
     api_vs_response.update(override_data)
