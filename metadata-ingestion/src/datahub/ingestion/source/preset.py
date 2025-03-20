@@ -111,6 +111,8 @@ class PresetSource(SupersetSource):
                 "Accept": "*/*",
             }
         )
+
+        logger.info(f"\n\naccess token is: {self.access_token}\n\n")
         # Test the connection
         test_response = requests_session.get(f"{self.config.connect_uri}/version")
         if not test_response.ok:

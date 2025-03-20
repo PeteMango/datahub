@@ -290,6 +290,7 @@ class SupersetSource(StatefulIngestionSourceBase):
             )
         self.session = self.login()
         self.owner_info = self.parse_owner_info()
+        self.retried = False
 
     def login(self) -> requests.Session:
         login_response = requests.post(
@@ -337,10 +338,21 @@ class SupersetSource(StatefulIngestionSourceBase):
                 timeout=self.config.timeout,
             )
 
-            if response.status_code != 200:
+            # for long ingestions, the session token expires, this retries
+            # in the event of a timeout
+            if response.status_code == 401 and not self.retried:
+                logger.warning(f"The session token expired, retrying...")
+                self.session = self.login()
+                self.retried = True
+                return self.paginate_entity_api_results(self, entity_type, page_size)
+            elif response.status_code != 200:
                 logger.warning(f"Failed to get {entity_type} data: {response.text}")
 
             payload = response.json()
+
+            # If successful, reset retry as it can session expire many times
+            self.retried = False 
+
             # Update total_items with the actual count from the response
             total_items = payload.get("count", total_items)
             # Yield each item in the result, this gets passed into the construct functions
@@ -374,9 +386,16 @@ class SupersetSource(StatefulIngestionSourceBase):
             f"{self.config.connect_uri}/api/v1/dataset/{dataset_id}",
             timeout=self.config.timeout,
         )
-        if dataset_response.status_code != 200:
+        if dataset_response.status_code == 401 and not self.retried:
+                logger.warning(f"The session token expired, retrying...")
+                self.session = self.login()
+                self.retried = True
+                return self.get_dataset_info(self, dataset_id)
+        elif dataset_response.status_code != 200:
             logger.warning(f"Failed to get dataset info: {dataset_response.text}")
             return {}
+        
+        self.retried = False
         return dataset_response.json()
 
     def get_datasource_urn_from_id(
