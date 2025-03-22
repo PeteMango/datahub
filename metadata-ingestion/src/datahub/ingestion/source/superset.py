@@ -338,8 +338,8 @@ class SupersetSource(StatefulIngestionSourceBase):
                 timeout=self.config.timeout,
             )
 
-            # for long ingestions, the session token expires, this retries
-            # in the event of a timeout
+            # retries for long ingestions, in which the session token
+            # might timeout, retry with a new jwt at most once
             if response.status_code == 401 and not self.retried:
                 logger.warning(f"The session token expired, retrying...")
                 self.session = self.login()

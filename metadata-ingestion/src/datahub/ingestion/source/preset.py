@@ -91,6 +91,8 @@ class PresetSource(SupersetSource):
         self.platform = "preset"
 
     def login(self):
+        # preset's jwt has an valid duration of five hours any ingestion 
+        # that takes longer will need to request a new token
         try:
             login_response = requests.post(
                 f"{self.config.manager_uri}/v1/auth/",
